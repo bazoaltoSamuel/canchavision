@@ -1,0 +1,28 @@
+# Configuración para fútbol 11
+sport: football11
+
+model:
+  weights: yolov8n.pt   # COCO preentrenado: person=0, sports ball=32
+  confidence: 0.3
+  imgsz: 1280
+  device: cpu           # cambia a "0" si tienes GPU NVIDIA
+
+classes:
+  person: 0
+  ball: 32
+
+teams:
+  num_teams: 2
+  fit_min_players: 4    # nº mínimo de jugadores para fijar los colores de equipo
+
+tracker:
+  lost_track_buffer: 60           # recuerda rastros perdidos (menos saltos de ID)
+  track_activation_threshold: 0.25
+  minimum_matching_threshold: 0.8
+
+detect_filter:
+  min_box_height: 18    # descarta cajas diminutas (ruido/falsos positivos)
+
+pitch:                  # Fase 2 (homografía)
+  length_m: 105
+  width_m: 68

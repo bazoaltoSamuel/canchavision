@@ -1,0 +1,28 @@
+# Configuración para futsal (campo más pequeño, menos jugadores)
+sport: futsal
+
+model:
+  weights: yolov8n.pt
+  confidence: 0.3
+  imgsz: 960
+  device: cpu
+
+classes:
+  person: 0
+  ball: 32
+
+teams:
+  num_teams: 2
+  fit_min_players: 3
+
+tracker:
+  lost_track_buffer: 60
+  track_activation_threshold: 0.25
+  minimum_matching_threshold: 0.8
+
+detect_filter:
+  min_box_height: 18
+
+pitch:
+  length_m: 40
+  width_m: 20
