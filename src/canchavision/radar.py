@@ -46,13 +46,21 @@ class PitchRadar:
     def calibrate(self, frame) -> bool:
         result = self.model.infer(frame, confidence=0.3)[0]
         kp = sv.KeyPoints.from_inference(result)
-        if kp.confidence is None or len(kp.confidence) == 0:
+        # 'confidence' está deprecado en supervision >=0.29 -> usa el nuevo nombre.
+        conf = getattr(kp, "keypoint_confidence", None)
+        if conf is None:
+            conf = kp.confidence
+        if conf is None or len(conf) == 0:
             return False
-        mask = kp.confidence[0] > self.kp_conf
+        conf0 = conf[0]
+        vertices = np.array(self.config.vertices, dtype=np.float32)
+        # Alinea por seguridad: distintas versiones devuelven distinto nº de puntos.
+        n = min(len(conf0), len(vertices))
+        mask = conf0[:n] > self.kp_conf
         if int(mask.sum()) < self.min_keypoints:
             return False
-        src = kp.xy[0][mask].astype(np.float32)
-        dst = np.array(self.config.vertices, dtype=np.float32)[mask]
+        src = kp.xy[0][:n][mask].astype(np.float32)
+        dst = vertices[:n][mask]
         self.transformer = ViewTransformer(source=src, target=dst)
         return True
 
