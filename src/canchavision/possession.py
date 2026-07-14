@@ -76,20 +76,21 @@ def compute(players_by_frame, ball_by_frame, max_dist_m=3.0,
         ball = ball_by_frame.get(f)
         raw[f] = _nearest_possessor(players_by_frame[f], ball, max_dist_m) if ball else None
 
+    # Equipo de cada rastro = mayoría GLOBAL en todo el clip. Decidirlo una sola
+    # vez (y no frame a frame) evita que un error puntual de etiquetado de equipo
+    # convierta un pase correcto en "fallido".
+    team_votes: dict[int, Counter] = defaultdict(Counter)
+    for f in frames:
+        for tid, team, x, y in players_by_frame[f]:
+            team_votes[tid][team] += 1
+    team_of = {tid: v.most_common(1)[0][0] for tid, v in team_votes.items()}
+
     # 2) Suavizado: voto mayoritario de track_id en ventana centrada
     smoothed = {}
-    team_of = {}
     for i, f in enumerate(frames):
         window = [raw[frames[j]] for j in range(max(0, i - smooth), min(len(frames), i + smooth + 1))]
         votes = Counter(p[0] for p in window if p is not None)
-        if votes:
-            tid = votes.most_common(1)[0][0]
-            smoothed[f] = tid
-            # equipo del track (mayoría en la ventana)
-            teams = [p[1] for p in window if p is not None and p[0] == tid]
-            team_of[tid] = Counter(teams).most_common(1)[0][0]
-        else:
-            smoothed[f] = None
+        smoothed[f] = votes.most_common(1)[0][0] if votes else None
 
     # 3) Posesión % por equipo
     team_frames = Counter()
