@@ -44,24 +44,24 @@ class PitchRadar:
         return self.transformer is not None
 
     def calibrate(self, frame) -> bool:
+        # Mapea cada keypoint a su vértice del campo por class_id (0..31).
+        # Robusto: funciona aunque el modelo devuelva menos de 32 puntos
+        # (distintas versiones de inference devuelven distinto número).
         result = self.model.infer(frame, confidence=0.3)[0]
-        kp = sv.KeyPoints.from_inference(result)
-        # 'confidence' está deprecado en supervision >=0.29 -> usa el nuevo nombre.
-        conf = getattr(kp, "keypoint_confidence", None)
-        if conf is None:
-            conf = kp.confidence
-        if conf is None or len(conf) == 0:
+        vertices = self.config.vertices
+        src, dst = [], []
+        for inst in getattr(result, "predictions", []) or []:
+            for k in getattr(inst, "keypoints", []) or []:
+                cid = int(k.class_id)
+                if 0 <= cid < len(vertices) and float(k.confidence) > self.kp_conf:
+                    src.append([float(k.x), float(k.y)])
+                    dst.append(vertices[cid])
+        if len(src) < self.min_keypoints:
             return False
-        conf0 = conf[0]
-        vertices = np.array(self.config.vertices, dtype=np.float32)
-        # Alinea por seguridad: distintas versiones devuelven distinto nº de puntos.
-        n = min(len(conf0), len(vertices))
-        mask = conf0[:n] > self.kp_conf
-        if int(mask.sum()) < self.min_keypoints:
-            return False
-        src = kp.xy[0][:n][mask].astype(np.float32)
-        dst = vertices[:n][mask]
-        self.transformer = ViewTransformer(source=src, target=dst)
+        self.transformer = ViewTransformer(
+            source=np.array(src, dtype=np.float32),
+            target=np.array(dst, dtype=np.float32),
+        )
         return True
 
     def to_pitch(self, foot_xy) -> np.ndarray:
