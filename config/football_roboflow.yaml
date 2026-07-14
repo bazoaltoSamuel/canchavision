@@ -3,6 +3,8 @@
 sport: football11
 detector: roboflow
 radar: true            # vista cenital + distancias en metros (Fase 2)
+radar_recalibrate_every: 1   # recalcula la homografía cada N frames (1 = cada frame,
+                             # radar más preciso; sube el número si vas en CPU lento)
 
 model:
   model_id: "football-players-detection-3zvbc/11"

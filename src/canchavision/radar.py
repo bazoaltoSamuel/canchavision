@@ -75,7 +75,8 @@ class PitchRadar:
     def pitch_size(self) -> tuple[int, int]:
         return self._base_pitch.shape[1], self._base_pitch.shape[0]
 
-    def render(self, pitch_xy: np.ndarray, team_labels: np.ndarray) -> np.ndarray:
+    def render(self, pitch_xy: np.ndarray, team_labels: np.ndarray,
+               ball_xy: np.ndarray | None = None) -> np.ndarray:
         pitch = self._base_pitch.copy()
         for t in range(2):
             pts = pitch_xy[team_labels == t] if len(pitch_xy) else pitch_xy
@@ -85,4 +86,10 @@ class PitchRadar:
                     face_color=TEAM_COLORS[t], edge_color=sv.Color.WHITE,
                     radius=16, pitch=pitch,
                 )
+        if ball_xy is not None and len(ball_xy):
+            pitch = draw_points_on_pitch(
+                self.config, np.asarray(ball_xy, dtype=np.float32).reshape(-1, 2),
+                face_color=sv.Color.WHITE, edge_color=sv.Color.BLACK,
+                radius=11, pitch=pitch,
+            )
         return pitch

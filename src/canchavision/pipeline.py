@@ -41,9 +41,12 @@ def run_pipeline(
     annotator = Annotator()
 
     player_id = cfg["classes"].get("player", cfg["classes"].get("person"))
+    gk_id = cfg["classes"].get("goalkeeper")
+    track_class_ids = [player_id] + ([gk_id] if gk_id is not None else [])
     ball_id = cfg["classes"]["ball"]
     fit_min = cfg["teams"].get("fit_min_players", 4)
     min_box_height = cfg.get("detect_filter", {}).get("min_box_height", 0)
+    recal_every = cfg.get("radar_recalibrate_every", 0)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -94,7 +97,7 @@ def run_pipeline(
             break
 
         det = detector.detect(frame)
-        players = det[det.class_id == player_id]
+        players = det[np.isin(det.class_id, track_class_ids)]
         if min_box_height > 0 and len(players) > 0:
             heights = players.xyxy[:, 3] - players.xyxy[:, 1]
             players = players[heights >= min_box_height]
@@ -102,10 +105,22 @@ def run_pipeline(
         balls = det[det.class_id == ball_id]
 
         boxes = players.xyxy
+        outfield = players.class_id == player_id  # jugadores de campo (no portero)
         if not teams.fitted:
-            teams.observe(frame, boxes)
+            teams.observe(frame, boxes[outfield] if len(boxes) else boxes)
             teams.try_fit(min_frames=min(10, fit_min * 2))
         team_labels = teams.predict(frame, boxes)
+        # Portero: hereda el equipo del jugador de campo más cercano.
+        if gk_id is not None and teams.fitted and len(boxes) and outfield.any() and (~outfield).any():
+            ofc = np.column_stack([
+                (boxes[outfield][:, 0] + boxes[outfield][:, 2]) / 2,
+                (boxes[outfield][:, 1] + boxes[outfield][:, 3]) / 2,
+            ])
+            oft = team_labels[outfield]
+            for i in np.where(~outfield)[0]:
+                cx, cy = (boxes[i, 0] + boxes[i, 2]) / 2, (boxes[i, 1] + boxes[i, 3]) / 2
+                j = int(np.argmin((ofc[:, 0] - cx) ** 2 + (ofc[:, 1] - cy) ** 2))
+                team_labels[i] = oft[j]
 
         if background is None:
             background = frame.copy()
@@ -120,8 +135,8 @@ def run_pipeline(
             foot = np.column_stack([
                 (boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3]
             ]).astype(np.float32)
-            if not radar.calibrated:
-                radar.calibrate(frame)
+            if (not radar.calibrated) or (recal_every > 0 and idx % recal_every == 0):
+                radar.calibrate(frame)  # recalibra (mejor ubicación; aguanta paneos)
             if radar.calibrated:
                 pitch_xy = radar.to_pitch(foot)      # cm
                 xy_m = pitch_xy / 100.0              # metros
@@ -131,16 +146,18 @@ def run_pipeline(
                         positions_rows.append(
                             (idx, int(tid), int(team), round(float(x), 2), round(float(y), 2))
                         )
-                radar_writer.write(radar.render(pitch_xy, team_labels))
+                ball_pitch = None
                 if len(balls) > 0:
                     bi = int(np.argmax(balls.confidence))
                     bx1, by1, bx2, by2 = balls.xyxy[bi]
                     bc = np.array([[(bx1 + bx2) / 2.0, (by1 + by2) / 2.0]], dtype=np.float32)
-                    bm = radar.to_pitch(bc)[0] / 100.0
+                    ball_pitch = radar.to_pitch(bc)   # cm, shape (1, 2)
+                    bm = ball_pitch[0] / 100.0
                     ball_rows.append(
                         (idx, round(float(bm[0]), 2), round(float(bm[1]), 2),
                          round(float(balls.confidence[bi]), 2))
                     )
+                radar_writer.write(radar.render(pitch_xy, team_labels, ball_pitch))
 
         frame = annotator.draw(frame, players, team_labels, balls)
         writer.write(frame)
