@@ -15,6 +15,8 @@ kits parecidos o con patrones.
 """
 from __future__ import annotations
 
+from collections import defaultdict
+
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
@@ -84,3 +86,57 @@ class TeamClassifier:
         if not self.fitted or len(boxes) == 0:
             return np.zeros(len(boxes), dtype=int)
         return self.kmeans.predict(self._features(frame, boxes))
+
+    def predict_with_conf(self, frame: np.ndarray, boxes):
+        """Etiqueta de equipo + confianza [0..1] por caja.
+
+        La confianza es el margen relativo entre las distancias a los dos
+        centros de cluster: alto = claramente de un equipo; ~0 = ambiguo
+        (oclusión, blur, color mezclado). Sirve para PONDERAR el voto temporal
+        y que los frames dudosos casi no cuenten.
+        """
+        n = len(boxes)
+        if not self.fitted or n == 0:
+            return np.zeros(n, dtype=int), np.zeros(n, dtype=float)
+        d = self.kmeans.transform(self._features(frame, boxes))  # (N, k)
+        labels = d.argmin(axis=1)
+        ds = np.sort(d, axis=1)
+        margin = (ds[:, 1] - ds[:, 0]) / (ds[:, 1] + 1e-6)  # 0..1
+        return labels.astype(int), margin.astype(float)
+
+
+class TeamVoteTracker:
+    """Estabiliza el equipo por track ID acumulando votos ponderados.
+
+    En lugar de creer la clasificación de color de un solo frame (que parpadea),
+    cada track acumula votos por equipo y devuelve SIEMPRE la mayoría actual.
+    Es monótonamente estable y auto-corrige: unos pocos frames malos no vuelcan
+    a un track que ya tiene historial claro.
+    """
+
+    def __init__(self, num_teams: int = 2):
+        self.num_teams = num_teams
+        self.votes: dict[int, np.ndarray] = defaultdict(
+            lambda: np.zeros(num_teams, dtype=float)
+        )
+
+    def update(self, track_ids, labels, weights) -> np.ndarray:
+        out = []
+        for tid, lab, w in zip(track_ids, labels, weights):
+            if tid is None:
+                out.append(int(lab))
+                continue
+            v = self.votes[int(tid)]
+            v[int(lab)] += max(float(w), 1e-3)  # aun con conf~0 suma un mínimo
+            out.append(int(np.argmax(v)))
+        return np.array(out, dtype=int)
+
+    def vote(self, track_id, label, weight: float = 1.0) -> None:
+        """Registra un voto suelto (p. ej. equipo heredado del portero)."""
+        if track_id is None:
+            return
+        self.votes[int(track_id)][int(label)] += max(float(weight), 1e-3)
+
+    def team_of(self, track_id) -> int | None:
+        v = self.votes.get(int(track_id)) if track_id is not None else None
+        return int(np.argmax(v)) if v is not None and v.sum() > 0 else None

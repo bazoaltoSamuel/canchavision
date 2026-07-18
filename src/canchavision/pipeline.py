@@ -13,7 +13,7 @@ from .annotate import Annotator
 from .detect import Detector, RoboflowDetector
 from .heatmap import HeatmapCollector
 from .stats import MetricStats
-from .teams import TeamClassifier
+from .teams import TeamClassifier, TeamVoteTracker
 from .track import Tracker
 
 
@@ -38,6 +38,7 @@ def run_pipeline(
     else:
         detector = Detector(**cfg["model"])
     teams = TeamClassifier(num_teams=cfg["teams"]["num_teams"])
+    team_votes = TeamVoteTracker(num_teams=cfg["teams"]["num_teams"])
     annotator = Annotator()
 
     player_id = cfg["classes"].get("player", cfg["classes"].get("person"))
@@ -106,11 +107,26 @@ def run_pipeline(
 
         boxes = players.xyxy
         outfield = players.class_id == player_id  # jugadores de campo (no portero)
+        tracker_ids = (
+            players.tracker_id
+            if players.tracker_id is not None
+            else [None] * len(boxes)
+        )
         if not teams.fitted:
             teams.observe(frame, boxes[outfield] if len(boxes) else boxes)
             teams.try_fit(min_frames=min(10, fit_min * 2))
-        team_labels = teams.predict(frame, boxes)
-        # Portero: hereda el equipo del jugador de campo más cercano.
+
+        # Equipo ESTABLE por track: voto temporal ponderado por confianza de color.
+        # El portero no vota por color (su kit difiere de ambos equipos): peso 0
+        # aquí y se resuelve por herencia + voto justo debajo.
+        raw_labels, conf = teams.predict_with_conf(frame, boxes)
+        w = conf.copy()
+        if gk_id is not None and len(w):
+            w[~outfield] = 0.0
+        team_labels = team_votes.update(tracker_ids, raw_labels, w)
+
+        # Portero: hereda el equipo (ya estable) del jugador de campo más cercano
+        # y lo vota, de modo que converge y deja de parpadear con el tiempo.
         if gk_id is not None and teams.fitted and len(boxes) and outfield.any() and (~outfield).any():
             ofc = np.column_stack([
                 (boxes[outfield][:, 0] + boxes[outfield][:, 2]) / 2,
@@ -120,15 +136,13 @@ def run_pipeline(
             for i in np.where(~outfield)[0]:
                 cx, cy = (boxes[i, 0] + boxes[i, 2]) / 2, (boxes[i, 1] + boxes[i, 3]) / 2
                 j = int(np.argmin((ofc[:, 0] - cx) ** 2 + (ofc[:, 1] - cy) ** 2))
-                team_labels[i] = oft[j]
+                inferred = int(oft[j])
+                team_votes.vote(tracker_ids[i], inferred, weight=0.5)
+                resolved = team_votes.team_of(tracker_ids[i])
+                team_labels[i] = resolved if resolved is not None else inferred
 
         if background is None:
             background = frame.copy()
-        tracker_ids = (
-            players.tracker_id
-            if players.tracker_id is not None
-            else [None] * len(boxes)
-        )
         heat.update(boxes, team_labels, tracker_ids)
 
         if radar_enabled and len(boxes) > 0:
