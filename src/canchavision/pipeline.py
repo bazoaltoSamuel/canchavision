@@ -23,6 +23,7 @@ def run_pipeline(
     output_path: str | Path | None = None,
     max_frames: int | None = None,
     start_sec: float = 0.0,
+    stride: int = 1,
 ) -> Path:
     video_path = Path(video_path)
     if not video_path.exists():
@@ -54,7 +55,12 @@ def run_pipeline(
         raise RuntimeError(f"OpenCV no pudo abrir el vídeo: {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    tracker = Tracker(frame_rate=int(round(fps)), **cfg.get("tracker", {}))
+    # Con stride solo procesamos 1 de cada N frames. El tiempo real entre frames
+    # PROCESADOS es N/fps, así que todo lo que depende de frames (tracker, stats,
+    # ventanas de posesión) trabaja con este fps EFECTIVO y sigue siendo correcto.
+    stride = max(int(stride), 1)
+    eff_fps = fps / stride
+    tracker = Tracker(frame_rate=int(round(eff_fps)), **cfg.get("tracker", {}))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -67,7 +73,7 @@ def run_pipeline(
         total = min(total, max_frames) if total > 0 else max_frames
 
     writer = cv2.VideoWriter(
-        str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+        str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), eff_fps, (w, h)
     )
 
     heat = HeatmapCollector(w, h, cfg["teams"]["num_teams"])
@@ -77,7 +83,7 @@ def run_pipeline(
     radar_enabled = cfg.get("radar", False)
     radar = None
     radar_writer = None
-    metric = MetricStats(fps=fps)
+    metric = MetricStats(fps=eff_fps)
     positions_rows: list[tuple] = []  # frame, track_id, team, x_m, y_m
     ball_rows: list[tuple] = []       # frame, x_m, y_m, conf
     if radar_enabled:
@@ -87,15 +93,22 @@ def run_pipeline(
         rw, rh = radar.pitch_size()
         radar_path = output_path.with_name(f"{video_path.stem}_radar.mp4")
         radar_writer = cv2.VideoWriter(
-            str(radar_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (rw, rh)
+            str(radar_path), cv2.VideoWriter_fourcc(*"mp4v"), eff_fps, (rw, rh)
         )
 
-    idx = 0
+    idx = 0    # frame de origen leído del vídeo
+    pidx = 0   # frame PROCESADO (0,1,2,... a eff_fps); es el que va a los CSV
     pbar = tqdm(total=total or None, desc="Procesando")
     while True:
         ok, frame = cap.read()
         if not ok or (max_frames and idx >= max_frames):
             break
+
+        # Con stride, salta los frames intermedios: solo procesamos 1 de cada N.
+        if idx % stride != 0:
+            idx += 1
+            pbar.update(1)
+            continue
 
         det = detector.detect(frame)
         players = det[np.isin(det.class_id, track_class_ids)]
@@ -149,7 +162,7 @@ def run_pipeline(
             foot = np.column_stack([
                 (boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3]
             ]).astype(np.float32)
-            if (not radar.calibrated) or (recal_every > 0 and idx % recal_every == 0):
+            if (not radar.calibrated) or (recal_every > 0 and pidx % recal_every == 0):
                 radar.calibrate(frame)  # recalibra (mejor ubicación; aguanta paneos)
             if radar.calibrated:
                 pitch_xy = radar.to_pitch(foot)      # cm
@@ -158,7 +171,7 @@ def run_pipeline(
                 for tid, team, (x, y) in zip(tracker_ids, team_labels, xy_m):
                     if tid is not None:
                         positions_rows.append(
-                            (idx, int(tid), int(team), round(float(x), 2), round(float(y), 2))
+                            (pidx, int(tid), int(team), round(float(x), 2), round(float(y), 2))
                         )
                 ball_pitch = None
                 if len(balls) > 0:
@@ -168,7 +181,7 @@ def run_pipeline(
                     ball_pitch = radar.to_pitch(bc)   # cm, shape (1, 2)
                     bm = ball_pitch[0] / 100.0
                     ball_rows.append(
-                        (idx, round(float(bm[0]), 2), round(float(bm[1]), 2),
+                        (pidx, round(float(bm[0]), 2), round(float(bm[1]), 2),
                          round(float(balls.confidence[bi]), 2))
                     )
                 radar_writer.write(radar.render(pitch_xy, team_labels, ball_pitch))
@@ -177,12 +190,18 @@ def run_pipeline(
         writer.write(frame)
 
         idx += 1
+        pidx += 1
         pbar.update(1)
 
     pbar.close()
     cap.release()
     writer.release()
     print(f"\n[OK] Vídeo anotado guardado en: {output_path}")
+    if stride > 1:
+        print(f"[i] stride={stride}: procesados {pidx} de {idx} frames a "
+              f"{eff_fps:.1f} fps efectivos.")
+        print(f"    Para re-tunear stats offline pasa el fps efectivo: "
+              f"python scripts/compute_stats.py <..._positions.csv> {eff_fps:.3f}")
 
     if background is not None:
         heat_path = output_path.with_name(f"{video_path.stem}_heatmap.png")
