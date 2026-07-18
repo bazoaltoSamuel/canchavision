@@ -38,8 +38,20 @@ def run_pipeline(
         detector = RoboflowDetector(**cfg["model"])
     else:
         detector = Detector(**cfg["model"])
-    teams = TeamClassifier(num_teams=cfg["teams"]["num_teams"])
-    team_votes = TeamVoteTracker(num_teams=cfg["teams"]["num_teams"])
+    n_teams = cfg["teams"]["num_teams"]
+    team_method = cfg["teams"].get("method", "color")
+    if team_method == "siglip":
+        from .team_embeddings import SiglipTeamClassifier
+
+        teams = SiglipTeamClassifier(num_teams=n_teams)
+        print(f"[i] Clasificador de equipos: SigLIP (device={teams.device})")
+    else:
+        teams = TeamClassifier(num_teams=n_teams)
+    # Cada cuántos frames PROCESADOS re-clasificar el equipo. Con SigLIP (caro)
+    # súbelo (~15): el equipo ya es estable por track, no hace falta re-embeder
+    # cada frame; los frames intermedios leen el equipo del voto acumulado.
+    classify_every = int(cfg["teams"].get("classify_every", 1))
+    team_votes = TeamVoteTracker(num_teams=n_teams)
     annotator = Annotator()
 
     player_id = cfg["classes"].get("player", cfg["classes"].get("person"))
@@ -129,14 +141,26 @@ def run_pipeline(
             teams.observe(frame, boxes[outfield] if len(boxes) else boxes)
             teams.try_fit(min_frames=min(10, fit_min * 2))
 
-        # Equipo ESTABLE por track: voto temporal ponderado por confianza de color.
-        # El portero no vota por color (su kit difiere de ambos equipos): peso 0
-        # aquí y se resuelve por herencia + voto justo debajo.
-        raw_labels, conf = teams.predict_with_conf(frame, boxes)
-        w = conf.copy()
-        if gk_id is not None and len(w):
-            w[~outfield] = 0.0
-        team_labels = team_votes.update(tracker_ids, raw_labels, w)
+        # Equipo ESTABLE por track: voto temporal ponderado por confianza.
+        # En frames muestreados re-clasificamos (color o SigLIP) y votamos; en el
+        # resto leemos el equipo ya consolidado del voto (barato, y con SigLIP
+        # evita re-embeder cada frame). El portero no vota por color/apariencia de
+        # equipo (su kit difiere de ambos): peso 0 y se resuelve por herencia abajo.
+        do_classify = teams.fitted and (
+            classify_every <= 1 or pidx % classify_every == 0
+        )
+        if do_classify:
+            raw_labels, conf = teams.predict_with_conf(frame, boxes)
+            w = conf.copy()
+            if gk_id is not None and len(w):
+                w[~outfield] = 0.0
+            team_labels = team_votes.update(tracker_ids, raw_labels, w)
+        else:
+            team_labels = np.array(
+                [(team_votes.team_of(t) or 0) if t is not None else 0
+                 for t in tracker_ids],
+                dtype=int,
+            )
 
         # Portero: hereda el equipo (ya estable) del jugador de campo más cercano
         # y lo vota, de modo que converge y deja de parpadear con el tiempo.

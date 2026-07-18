@@ -1,0 +1,39 @@
+# Fútbol 11 en GPU con clasificación de equipos por EMBEDDINGS (SigLIP).
+# Igual que football_roboflow.yaml pero separa equipos por APARIENCIA, no solo
+# por color -> funciona aunque los dos kits sean parecidos (blanco vs blanco).
+# Pensado para Colab/GPU. Requiere ROBOFLOW_API_KEY (detección) + descarga del
+# modelo SigLIP (automática la primera vez).
+sport: football11
+detector: roboflow
+radar: true
+radar_recalibrate_every: 25
+
+model:
+  model_id: "football-players-detection-3zvbc/11"
+  confidence: 0.3
+
+classes:
+  ball: 0
+  goalkeeper: 1
+  player: 2
+  referee: 3
+
+teams:
+  num_teams: 2
+  fit_min_players: 4
+  method: siglip        # 'color' (CPU) o 'siglip' (GPU, robusto a kits parecidos)
+  classify_every: 15    # re-embeder el equipo cada N frames procesados. El equipo
+                        # ya es estable por track (voto), así que 15 ahorra mucha
+                        # GPU sin perder precisión. Baja a 1 si dudas.
+
+tracker:
+  lost_track_buffer: 60
+  track_activation_threshold: 0.25
+  minimum_matching_threshold: 0.8
+
+detect_filter:
+  min_box_height: 0
+
+pitch:
+  length_m: 105
+  width_m: 68
