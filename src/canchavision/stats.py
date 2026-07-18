@@ -58,6 +58,20 @@ class MetricStats:
                 self.tracks[int(tid)].append((float(p[0]), float(p[1])))
 
     @staticmethod
+    def _median_smooth(arr: np.ndarray, w: int) -> np.ndarray:
+        """Filtro de MEDIANA por track: elimina los picos de 1-2 frames de la
+        homografía/detección (posición que 'salta' y vuelve). La media sola no
+        los quita; la mediana sí, y no inventa velocidades imposibles."""
+        if w <= 1 or len(arr) < w:
+            return arr
+        h = w // 2
+        out = arr.copy()
+        for i in range(len(arr)):
+            lo, hi = max(0, i - h), min(len(arr), i + h + 1)
+            out[i] = np.median(arr[lo:hi], axis=0)
+        return out
+
+    @staticmethod
     def _smooth(arr: np.ndarray, w: int) -> np.ndarray:
         if w <= 1 or len(arr) < w:
             return arr
@@ -92,7 +106,9 @@ class MetricStats:
         for tid, pts in self.tracks.items():
             if len(pts) < smooth + 2 * vel_window + 1:
                 continue
-            sm = self._smooth(np.array(pts, dtype=float), smooth)
+            # 1) mediana (mata picos de ruido)  ->  2) media (suaviza)
+            pts_arr = self._median_smooth(np.array(pts, dtype=float), 5)
+            sm = self._smooth(pts_arr, smooth)
             n = len(sm)
 
             # Distancia: paso a paso, descartando teletransportes (ID reasignado)
@@ -111,9 +127,14 @@ class MetricStats:
             hi = speeds >= sprint_ms
             hi_steps = hi[: len(steps)]
             avg_ms = dist / (n / self.fps) if n else 0.0
+            # Vel. máx robusta: percentil 98 (un sprint real dura decenas de
+            # frames; un pico de ruido 1-2 -> queda fuera del p98). Evita que un
+            # único salto marque 36 km/h a todo el mundo.
+            valid = speeds[w:n - w] if n > 2 * w else speeds
+            vmax = float(np.percentile(valid, 98)) if len(valid) else 0.0
             out[tid] = {
                 "distancia_m": round(dist, 1),
-                "vel_max_kmh": round(float(speeds.max()) * 3.6, 1),
+                "vel_max_kmh": round(vmax * 3.6, 1),
                 "vel_media_kmh": round(avg_ms * 3.6, 1),
                 "sprints": self._count_sprints(hi, min_sprint_frames),
                 "dist_alta_int_m": round(float(steps[hi_steps].sum()), 1),
